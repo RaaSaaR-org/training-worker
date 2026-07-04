@@ -34,6 +34,7 @@ p.add_argument("--num-gpus")
 p.add_argument("--output-dir")
 p.add_argument("--max-steps", type=int)
 p.add_argument("--global-batch-size")
+p.add_argument("--learning-rate")
 p.add_argument("--dataloader-num-workers")
 p.add_argument("--fail", action="store_true")
 args = p.parse_args()
@@ -57,6 +58,35 @@ ck.mkdir(parents=True, exist_ok=True)
 (ck / "model.safetensors").write_bytes(b"fake-weights")
 (ck / "config.json").write_text("{}")
 print("Training completed", flush=True)
+'''
+
+
+# Mimics the real convert_v3_to_v2.py: resolves the dataset at
+# <root>/<repo-id>, backs the v3 original up to a sibling *_v3.0 dir and
+# writes the v2.1 dataset in place.
+_FAKE_CONVERTER = '''
+import argparse
+import json
+import pathlib
+import shutil
+import sys
+
+p = argparse.ArgumentParser()
+p.add_argument("--repo-id", required=True)
+p.add_argument("--root", required=True)
+args = p.parse_args()
+
+root = pathlib.Path(args.root) / args.repo_id
+if not (root / "meta" / "info.json").exists():
+    print(f"dataset not found at {root}", file=sys.stderr)
+    sys.exit(1)
+
+shutil.copytree(root, root.parent / (root.name + "_v3.0"))
+info_path = root / "meta" / "info.json"
+info = json.loads(info_path.read_text())
+info["codebase_version"] = "v2.1"
+info_path.write_text(json.dumps(info))
+print("Converted to v2.1", flush=True)
 '''
 
 
@@ -84,6 +114,16 @@ def dataset_v2(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def dataset_v3(dataset_v2: Path) -> Path:
+    """The same dataset flagged as LeRobot v3 — must trigger conversion."""
+    info_path = dataset_v2 / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["codebase_version"] = "v3.0"
+    info_path.write_text(json.dumps(info))
+    return dataset_v2
+
+
+@pytest.fixture
 def fake_gr00t_repo(tmp_path: Path) -> Path:
     """Directory that passes the trainer's Isaac-GR00T clone checks."""
     repo = tmp_path / "Isaac-GR00T"
@@ -92,7 +132,7 @@ def fake_gr00t_repo(tmp_path: Path) -> Path:
     script.write_text(_FAKE_LAUNCH_FINETUNE)
     converter = repo / "scripts" / "lerobot_conversion" / "convert_v3_to_v2.py"
     converter.parent.mkdir(parents=True)
-    converter.write_text("raise SystemExit(0)\n")
+    converter.write_text(_FAKE_CONVERTER)
     return repo
 
 

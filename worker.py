@@ -127,8 +127,12 @@ def _run_one_job(cfg: Config, server: ServerClient, job: ClaimedJob) -> None:
     heartbeat = HeartbeatThread(server, job.id, cfg.heartbeat_interval_sec, cancel_flag)
     heartbeat.start()
 
-    # Per-job scratch dir
-    with tempfile.TemporaryDirectory(prefix=f"neodem-job-{job.id}-") as tmp:
+    # Per-job scratch dir. ignore_cleanup_errors: a straggling trainer
+    # subprocess may still be writing here while rmtree runs — that must
+    # not take down the worker.
+    with tempfile.TemporaryDirectory(
+        prefix=f"neodem-job-{job.id}-", ignore_cleanup_errors=True
+    ) as tmp:
         work_dir = Path(tmp)
         ctx = TrainerContext(
             job_id=job.id,
@@ -258,7 +262,15 @@ def main() -> None:
                 continue
 
             idle_prints = 0
-            _run_one_job(cfg, server, job)
+            try:
+                _run_one_job(cfg, server, job)
+            except Exception as e:  # noqa: BLE001 — one bad job must not stop the loop
+                log.error(
+                    "Job runner crashed for job %s: %s\n%s",
+                    job.id,
+                    e,
+                    traceback.format_exc(),
+                )
     finally:
         server.close()
         log.info("Worker stopped cleanly.")

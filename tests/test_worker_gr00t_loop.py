@@ -74,8 +74,8 @@ def test_gr00t_job_runs_through_full_worker_loop(monkeypatch, gr00t_env, dataset
     assert server.progress_calls, "no progress was streamed to the server"
 
 
-def test_gr00t_job_setup_failure_posts_failed(monkeypatch):
-    """No GR00T_REPO_DIR → the job fails cleanly, the worker survives."""
+def test_gr00t_job_missing_repo_dir_posts_failed(monkeypatch):
+    """No GR00T_REPO_DIR → train() raises, the job fails cleanly, the worker survives."""
     monkeypatch.delenv("GR00T_REPO_DIR", raising=False)
     cfg = make_config()
     server = FakeServer()
@@ -95,3 +95,28 @@ def test_gr00t_job_setup_failure_posts_failed(monkeypatch):
     assert server.completed is None
     assert len(server.failures) == 1
     assert "GR00T_REPO_DIR" in server.failures[0]
+
+
+def test_trainer_setup_failure_posts_failed(monkeypatch):
+    """_pick_trainer raising (missing ML deps) fails the job, not the worker."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "trainers.smolvla_lora", None)
+    cfg = make_config()
+    server = FakeServer()
+    job = ClaimedJob(
+        id="job-loop-3",
+        dataset_id="ds-1",
+        dataset_storage_path="ds-1",
+        dataset_lerobot_version="v2.1",
+        base_model="smolvla_base",
+        fine_tune_method="lora",
+        hyperparameters={},
+        status="running",
+    )
+
+    worker_mod._run_one_job(cfg, server, job)
+
+    assert server.completed is None
+    assert len(server.failures) == 1
+    assert server.failures[0].startswith("trainer setup failed")

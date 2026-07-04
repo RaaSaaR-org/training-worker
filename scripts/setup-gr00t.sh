@@ -38,6 +38,16 @@ echo "▶ Syncing Isaac-GR00T environment (Python 3.10 + CUDA deps, takes a whil
 cd "$GR00T_DIR"
 uv sync --python 3.10
 
+# The LeRobot v3→v2 converter needs lerobot, which lives in its own
+# subproject env — the worker runs it via `uv run --project` on this dir.
+CONVERTER_DIR="$GR00T_DIR/scripts/lerobot_conversion"
+if [ -f "$CONVERTER_DIR/pyproject.toml" ]; then
+  echo "▶ Syncing LeRobot v3→v2 converter environment"
+  (cd "$CONVERTER_DIR" && uv sync)
+else
+  echo "⚠ $CONVERTER_DIR has no pyproject.toml — v3 datasets cannot be converted"
+fi
+
 echo
 echo "✓ Done. Add to training-worker/.env:"
 echo "    GR00T_REPO_DIR=$GR00T_DIR"

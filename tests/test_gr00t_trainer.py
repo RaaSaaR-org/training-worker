@@ -207,6 +207,27 @@ class TestTrainEndToEnd:
         assert (ctx.work_dir / "neodem_modality_config.py").exists()
         assert (ctx.work_dir / "dataset" / "meta" / "modality.json").exists()
 
+    def test_v3_dataset_converted_then_trained(self, monkeypatch, gr00t_env, dataset_v3, tmp_path):
+        """v3 dataset → converter runs (root/repo-id resolution, *_v3.0 backup
+        skipped by the root lookup) → training proceeds on the converted copy."""
+
+        def nested_download(self: Gr00tTrainer, ctx: TrainerContext, dest: Path) -> None:
+            shutil.copytree(dataset_v3, dest / "ds-1")
+
+        monkeypatch.setattr(Gr00tTrainer, "_download_dataset", nested_download)
+        trainer = Gr00tTrainer()
+        ctx = make_ctx(tmp_path, hyperparameters={"max_steps": 4})
+
+        result = trainer.train(ctx, lambda ev: True)
+
+        assert result.artifact_path.exists()
+        converted = ctx.work_dir / "dataset" / "ds-1"
+        info = json.loads((converted / "meta" / "info.json").read_text())
+        assert info["codebase_version"] == "v2.1"
+        assert (converted.parent / "ds-1_v3.0" / "meta" / "info.json").exists()
+        # modality.json was generated on the converted copy, not the backup
+        assert (converted / "meta" / "modality.json").exists()
+
     def test_cancellation_kills_subprocess(self, monkeypatch, gr00t_env, dataset_v2, tmp_path):
         patch_download(monkeypatch, dataset_v2)
         trainer = Gr00tTrainer()

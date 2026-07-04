@@ -17,6 +17,10 @@ Env vars read by this trainer:
   GR00T_PYTHON              optional interpreter that already has gr00t
                             installed (e.g. NVIDIA's container) — replaces
                             the default ``uv run --project`` prefix
+  GR00T_CONVERTER_PYTHON    optional interpreter for the v3→v2 converter,
+                            which needs lerobot (defaults to the converter's
+                            own uv env under scripts/lerobot_conversion,
+                            or GR00T_PYTHON if set)
   GR00T_ALLOW_NON_CUDA      allow TRAINING_DEVICE != cuda (smoke tests only)
   GR00T_PROGRESS_POLL_SEC   progress/cancel poll interval (default 5)
 
@@ -33,6 +37,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import tarfile
 import threading
@@ -59,7 +64,10 @@ _CONVERT_SCRIPT = Path("scripts") / "lerobot_conversion" / "convert_v3_to_v2.py"
 _RE_LOSS = re.compile(r"'loss':\s*([0-9.eE+-]+)")
 _RE_LR = re.compile(r"'learning_rate':\s*([0-9.eE+-]+)")
 # tqdm progress bars:  10%|█         | 200/2000 [01:23<12:34, 2.39it/s]
-_RE_STEP = re.compile(r"(\d+)/(\d+)\s*\[")
+# Anchored to a bare leading percentage so labelled bars (HF Hub downloads
+# like "Fetching 14 files: 100%|…| 14/14 [", dataset "Map: …") don't
+# register as training steps.
+_RE_STEP = re.compile(r"^\s*\d+%\|.*\|\s*(\d+)/(\d+)\s*\[")
 
 _DEFAULT_BASE_MODEL = "nvidia/GR00T-N1.7-3B"
 
@@ -173,6 +181,21 @@ class Gr00tTrainer(BaseTrainer):
             return [override]
         return ["uv", "run", "--project", str(repo_dir), "python"]
 
+    def _converter_prefix(self, repo_dir: Path) -> list[str]:
+        """Command prefix for the v3→v2 converter.
+
+        The converter needs lerobot, which Isaac-GR00T's main env does not
+        ship — it lives in scripts/lerobot_conversion with its own
+        pyproject.toml (synced by scripts/setup-gr00t.sh).
+        """
+        override = (
+            os.environ.get("GR00T_CONVERTER_PYTHON", "").strip()
+            or os.environ.get("GR00T_PYTHON", "").strip()
+        )
+        if override:
+            return [override]
+        return ["uv", "run", "--project", str(repo_dir / _CONVERT_SCRIPT.parent), "python"]
+
     # ====================================================================
     # DATASET
     # ====================================================================
@@ -182,22 +205,23 @@ class Gr00tTrainer(BaseTrainer):
         from storage import StorageClient
 
         storage = StorageClient(
-            endpoint=os.environ["RUSTFS_ENDPOINT"],
-            access_key=os.environ["RUSTFS_ACCESS_KEY"],
-            secret_key=os.environ["RUSTFS_SECRET_KEY"],
+            endpoint=os.environ.get("RUSTFS_ENDPOINT", "http://localhost:9000"),
+            access_key=os.environ.get("RUSTFS_ACCESS_KEY", "rustfsadmin"),
+            secret_key=os.environ.get("RUSTFS_SECRET_KEY", "rustfsadmin"),
             dataset_bucket=os.environ.get("RUSTFS_BUCKET_DATASETS", "datasets"),
             model_bucket=os.environ.get("RUSTFS_BUCKET_MODELS", "models"),
         )
         storage.download_dataset(ctx.dataset_storage_path, dest)
 
     def _locate_dataset_root(self, base: Path) -> Path:
-        """Find the directory holding meta/info.json (skipping *_v30 backups)."""
+        """Find the directory holding meta/info.json (skipping the converter's
+        *_v3.0 backups)."""
         if (base / "meta" / "info.json").exists():
             return base
         candidates = sorted(
             p.parent.parent
             for p in base.rglob("meta/info.json")
-            if "_v30" not in p.parent.parent.name
+            if not p.parent.parent.name.endswith(("_v3.0", "_v30"))
         )
         if not candidates:
             raise FileNotFoundError(f"LeRobot meta/info.json not found under {base}")
@@ -210,8 +234,9 @@ class Gr00tTrainer(BaseTrainer):
     def _convert_v3_to_v2(self, repo_dir: Path, ctx: TrainerContext, dataset_dir: Path) -> None:
         """Run Isaac-GR00T's LeRobot v3 → v2.1 converter in its env.
 
-        The converter renames the v3 original to *_v30 and writes the v2.1
-        dataset in place.
+        The converter resolves the dataset at <root>/<repo-id>, moves the v3
+        original to a sibling *_v3.0 backup and writes the v2.1 dataset in
+        place — so repo-id must be the dataset dir's own name, root its parent.
         """
         script = repo_dir / _CONVERT_SCRIPT
         if not script.exists():
@@ -219,12 +244,12 @@ class Gr00tTrainer(BaseTrainer):
                 f"v3 dataset but converter missing at {script} — update the Isaac-GR00T clone"
             )
         cmd = [
-            *self._launch_prefix(repo_dir),
+            *self._converter_prefix(repo_dir),
             str(script),
             "--repo-id",
-            f"local/{ctx.dataset_id}",
+            dataset_dir.name,
             "--root",
-            str(dataset_dir),
+            str(dataset_dir.parent),
         ]
         log.info("[GR00T] converting dataset: %s", " ".join(cmd))
         proc = subprocess.run(
@@ -407,6 +432,7 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         batch_size = int(hp.get("global_batch_size", hp.get("batch_size", 32)))
         embodiment_tag = str(hp.get("embodiment_tag", "NEW_EMBODIMENT"))
         num_workers = int(hp.get("dataloader_num_workers", 4))
+        learning_rate = float(hp.get("learning_rate", 1e-4))
         extra_args = [str(a) for a in hp.get("extra_args", [])]
 
         return [
@@ -428,6 +454,8 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
             str(max_steps),
             "--global-batch-size",
             str(batch_size),
+            "--learning-rate",
+            str(learning_rate),
             "--dataloader-num-workers",
             str(num_workers),
             *extra_args,
@@ -463,6 +491,9 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # Own process group: `uv run` wraps python in a child, so
+            # cancellation must signal the whole group, not just uv.
+            start_new_session=True,
         )
         assert proc.stdout is not None
 
@@ -504,12 +535,12 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
             time.sleep(poll_sec)
 
         if cancelled:
-            log.info("[GR00T] cancellation requested — terminating fine-tune process")
-            proc.terminate()
+            log.info("[GR00T] cancellation requested — terminating fine-tune process group")
+            self._signal_group(proc, signal.SIGTERM)
             try:
                 proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self._signal_group(proc, signal.SIGKILL)
                 proc.wait(timeout=10)
             reader.join(timeout=5)
             raise CancelledError(f"cancelled at step {state['step']}")
@@ -523,6 +554,18 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         log.info("[GR00T] fine-tuning finished — final step %d loss %.4f",
                  state["step"], state["loss"])
         return state
+
+    @staticmethod
+    def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+        """Signal the subprocess's whole process group, falling back to the
+        direct child if the group is already gone."""
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                pass
 
     def _parse_line(
         self,

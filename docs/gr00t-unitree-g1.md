@@ -81,7 +81,8 @@ Notes:
   artifact.
 - Progress (step/loss) streams to the UI; cancel from the UI kills the fine-tune process.
 
-Result: `s3://model-checkpoints/<jobId>/gr00t_finetune.tar.gz` containing the newest
+Result: `s3://<RUSTFS_BUCKET_MODELS>/<jobId>/gr00t_finetune.tar.gz` (bucket
+`model-checkpoints` with the shipped `.env.example`) containing the newest
 `checkpoint-<step>` (full HF checkpoint, several GB).
 
 ## 4. Deploy to the G1

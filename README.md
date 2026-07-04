@@ -80,6 +80,7 @@ All config via env vars or a `.env` file — see `.env.example`.
 | `TRAINER_STUB` | `false` | Set `true` during Phase 1a validation |
 | `GR00T_REPO_DIR` | — | Path to a local Isaac-GR00T clone (GR00T jobs only) |
 | `GR00T_PYTHON` | — | Optional interpreter with `gr00t` installed (containers) |
+| `GR00T_CONVERTER_PYTHON` | — | Optional interpreter for the LeRobot v3→v2 converter |
 
 ## Trainer dispatch
 
@@ -165,7 +166,7 @@ Hardware: 40 GB+ VRAM recommended for fine-tuning (H100/L40); an RTX 4090 works 
 3. Ensures `meta/modality.json` exists — auto-generated from `info.json` if missing (one `robot` state/action block + all cameras).
 4. Generates a modality config `.py` (NEW_EMBODIMENT) from the modality.json, unless `hyperparameters.modality_config_path` points at a hand-written one.
 5. Runs `gr00t/experiment/launch_finetune.py` with `--base-model-path nvidia/GR00T-N1.7-3B`, streams parsed step/loss progress to the server, honours cancel by terminating the process.
-6. Tars the newest `checkpoint-*` dir → `s3://models/<jobId>/gr00t_finetune.tar.gz`.
+6. Tars the newest `checkpoint-*` dir → `s3://<RUSTFS_BUCKET_MODELS>/<jobId>/gr00t_finetune.tar.gz`.
 
 ### GR00T hyperparameter knobs
 
@@ -173,6 +174,7 @@ Hardware: 40 GB+ VRAM recommended for fine-tuning (H100/L40); an RTX 4090 works 
 |---|---|---|
 | `max_steps` | 2000 | fine-tune steps ("a few thousand" per NVIDIA) |
 | `global_batch_size` | 32 | lower this on 24 GB cards |
+| `learning_rate` | 1e-4 | passed to launch_finetune.py |
 | `embodiment_tag` | `NEW_EMBODIMENT` | `UNITREE_G1_SONIC` for whole-body G1 (see docs) |
 | `modality_config_path` | auto-generated | path to a hand-written modality config .py |
 | `action_horizon` | 16 | action chunk length in the generated config |
