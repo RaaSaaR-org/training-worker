@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versioning uses 
 
 ## [v2026.07.04] - 2026-07-04
 
+### Added
+
+- **GR00T N1.x fine-tuning trainer** via the NVIDIA Isaac-GR00T subprocess. Jobs whose `baseModel` contains `gr00t` fine-tune GR00T N1.7/N1.5: `worker.py` dispatches the trainer per job, `trainers/gr00t_n1.py` runs `launch_finetune.py` in Isaac-GR00T's own uv env (CUDA), converts LeRobot v3→v2, auto-generates the modality config (overridable via `modality_config_path`, e.g. `UNITREE_G1_SONIC` whole-body), streams step/loss progress, honours cancel by killing the process group, and uploads the newest checkpoint. Covered by 35 GPU-free tests; ready for real Unitree G1 validation (`docs/gr00t-unitree-g1.md`).
+
+### Maintenance
+
+- CalVer release automation — an always-open Release PR (`prepare-release-pr.yml`) that on merge tags `vYYYY.MM.DD`, publishes a GitHub Release, and builds/pushes `ghcr.io/raasaar-org/neodem-training-worker`.
+
 
 ## [v2026.04.12] - 2026-04-12
 
