@@ -1,21 +1,21 @@
 """NeoDEM training worker — poll server, claim jobs, run trainers, post callbacks.
 
-Phase 1a (current): uses StubTrainer to validate the full loop.
-Phase 1b (next):    swap in the HF Transformers + PEFT LoRA trainer for SmolVLA.
+Trainers are picked per job from the job's base model:
+  - smolvla* → SmolVLA + PEFT LoRA (in-process, MPS/CUDA)
+  - gr00t*   → GR00T N1.x via Isaac-GR00T subprocess (CUDA only)
+  - TRAINER_STUB=true forces the stub trainer for all jobs.
 
 Run:
     uv run python worker.py                    # uses env / .env
-    TRAINER_STUB=true uv run python worker.py  # force stub mode (default for now)
+    TRAINER_STUB=true uv run python worker.py  # force stub mode
 """
 
 from __future__ import annotations
 
 import logging
 import signal
-import sys
 import tempfile
 import threading
-import time
 import traceback
 from pathlib import Path
 
@@ -75,27 +75,36 @@ class HeartbeatThread(threading.Thread):
 
 
 # ------------------------------------------------------------------ trainer pick
-def _pick_trainer(cfg: Config) -> BaseTrainer:
+def _pick_trainer(cfg: Config, job: ClaimedJob) -> BaseTrainer:
+    """Select the trainer for one job based on its base model.
+
+    Imports are lazy so stub mode doesn't require torch/transformers, and
+    a missing ML stack only fails the affected job — not the worker.
+    """
     if cfg.stub_mode:
-        log.info("Using StubTrainer (Phase 1a fake training loop)")
+        log.info("Using StubTrainer (TRAINER_STUB=true)")
         return StubTrainer()
 
-    # Phase 1b: import the real trainer lazily so stub mode doesn't require
-    # torch/transformers to be installed.
+    base = (job.base_model or "").lower()
+    if "gr00t" in base or "groot" in base:
+        from trainers.gr00t_n1 import Gr00tTrainer
+
+        log.info("Using Gr00tTrainer for base model %r", job.base_model)
+        return Gr00tTrainer()
+
     try:
         from trainers.smolvla_lora import SmolVLALoraTrainer
     except ImportError as e:
-        log.error(
-            "Real trainer requested but ML dependencies missing (%s). "
-            "Install with `uv pip install -e .`",
-            e,
-        )
-        sys.exit(2)
+        raise RuntimeError(
+            f"SmolVLA trainer requested but ML dependencies missing ({e}). "
+            "Install with `uv pip install -e .`"
+        ) from e
+    log.info("Using SmolVLALoraTrainer for base model %r", job.base_model)
     return SmolVLALoraTrainer()
 
 
 # -------------------------------------------------------------- single job run
-def _run_one_job(cfg: Config, server: ServerClient, trainer: BaseTrainer, job: ClaimedJob) -> None:
+def _run_one_job(cfg: Config, server: ServerClient, job: ClaimedJob) -> None:
     log.info(
         "▶ Running job %s — dataset=%s base=%s method=%s",
         job.id,
@@ -103,6 +112,16 @@ def _run_one_job(cfg: Config, server: ServerClient, trainer: BaseTrainer, job: C
         job.base_model,
         job.fine_tune_method,
     )
+
+    try:
+        trainer = _pick_trainer(cfg, job)
+    except Exception as e:  # noqa: BLE001
+        log.error("Trainer setup failed for job %s: %s", job.id, e)
+        try:
+            server.failed(job.id, f"trainer setup failed: {e}")
+        except Exception as e2:  # noqa: BLE001
+            log.error("Failed to POST /failed: %s", e2)
+        return
 
     cancel_flag = threading.Event()
     heartbeat = HeartbeatThread(server, job.id, cfg.heartbeat_interval_sec, cancel_flag)
@@ -218,7 +237,6 @@ def main() -> None:
     cfg = Config.from_env()
     log.info("NeoDEM training worker starting — %s", cfg.summary())
 
-    trainer = _pick_trainer(cfg)
     server = ServerClient(cfg.server_url, cfg.worker_id, device=cfg.device)
 
     idle_prints = 0
@@ -240,7 +258,7 @@ def main() -> None:
                 continue
 
             idle_prints = 0
-            _run_one_job(cfg, server, trainer, job)
+            _run_one_job(cfg, server, job)
     finally:
         server.close()
         log.info("Worker stopped cleanly.")
