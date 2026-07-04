@@ -78,6 +78,19 @@ All config via env vars or a `.env` file — see `.env.example`.
 | `RUSTFS_ENDPOINT` | `http://localhost:9000` | Pi's RustFS URL when running on Mac |
 | `TRAINING_DEVICE` | `cpu` | `mps` on Mac, `cuda` on Linux GPU |
 | `TRAINER_STUB` | `false` | Set `true` during Phase 1a validation |
+| `GR00T_REPO_DIR` | — | Path to a local Isaac-GR00T clone (GR00T jobs only) |
+| `GR00T_PYTHON` | — | Optional interpreter with `gr00t` installed (containers) |
+| `GR00T_CONVERTER_PYTHON` | — | Optional interpreter for the LeRobot v3→v2 converter |
+
+## Trainer dispatch
+
+The worker picks a trainer **per job** from the job's `baseModel`:
+
+| baseModel | Trainer | Device |
+|---|---|---|
+| contains `gr00t` | `Gr00tTrainer` — GR00T N1.x via Isaac-GR00T subprocess | CUDA only |
+| anything else | `SmolVLALoraTrainer` — in-process HF + PEFT | MPS / CUDA / CPU |
+| (`TRAINER_STUB=true`) | `StubTrainer` — fakes the loop | any |
 
 ## Phase 1b — Real SmolVLA LoRA trainer
 
@@ -130,6 +143,46 @@ The first run will download `lerobot/smolvla_base` (~4GB) from HuggingFace into 
 | `lora_dropout` | 0.05 | PEFT dropout |
 | `weight_decay` | 0.01 | optimizer regularization |
 | `max_steps` | 0 | hard step cap (0 = no cap) — useful for quick sanity runs |
+
+## GR00T N1.7 trainer
+
+Jobs whose `baseModel` contains `gr00t` (e.g. `gr00t-n1.7` or `nvidia/GR00T-N1.7-3B`) run NVIDIA [Isaac-GR00T](https://github.com/NVIDIA/Isaac-GR00T) fine-tuning. Isaac-GR00T pins **Python 3.10 + CUDA + flash-attn**, so it runs as a subprocess in its own uv environment — the worker's Python 3.12 env stays untouched.
+
+**Setup (on the CUDA machine, once):**
+
+```bash
+./scripts/setup-gr00t.sh ~/Isaac-GR00T     # clone + uv sync --python 3.10
+# then in .env:
+#   GR00T_REPO_DIR=~/Isaac-GR00T
+#   TRAINING_DEVICE=cuda
+```
+
+Hardware: 40 GB+ VRAM recommended for fine-tuning (H100/L40); an RTX 4090 works with small `global_batch_size`. Mac/MPS is **not** supported.
+
+### What the GR00T trainer does
+
+1. Downloads the dataset from RustFS into a temp dir.
+2. LeRobot **v3** datasets are converted to v2.1 via Isaac-GR00T's `convert_v3_to_v2.py` (GR00T consumes the v2 flavor).
+3. Ensures `meta/modality.json` exists — auto-generated from `info.json` if missing (one `robot` state/action block + all cameras).
+4. Generates a modality config `.py` (NEW_EMBODIMENT) from the modality.json, unless `hyperparameters.modality_config_path` points at a hand-written one.
+5. Runs `gr00t/experiment/launch_finetune.py` with `--base-model-path nvidia/GR00T-N1.7-3B`, streams parsed step/loss progress to the server, honours cancel by terminating the process.
+6. Tars the newest `checkpoint-*` dir → `s3://<RUSTFS_BUCKET_MODELS>/<jobId>/gr00t_finetune.tar.gz`.
+
+### GR00T hyperparameter knobs
+
+| Key | Default | Notes |
+|---|---|---|
+| `max_steps` | 2000 | fine-tune steps ("a few thousand" per NVIDIA) |
+| `global_batch_size` | 32 | lower this on 24 GB cards |
+| `learning_rate` | 1e-4 | passed to launch_finetune.py |
+| `embodiment_tag` | `NEW_EMBODIMENT` | `UNITREE_G1_SONIC` for whole-body G1 (see docs) |
+| `modality_config_path` | auto-generated | path to a hand-written modality config .py |
+| `action_horizon` | 16 | action chunk length in the generated config |
+| `action_representation` | `absolute` | or `relative` (joint-space) |
+| `dataloader_num_workers` | 4 | |
+| `extra_args` | `[]` | raw extra CLI flags passed to launch_finetune.py |
+
+For testing with a real **Unitree G1**, see [`docs/gr00t-unitree-g1.md`](docs/gr00t-unitree-g1.md).
 
 ## Adding new trainers
 

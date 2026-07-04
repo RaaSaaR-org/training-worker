@@ -34,6 +34,9 @@ dependencies = [
 real-trainer = [
     # lerobot is installed from source (see README)
 ]
+# GR00T N1.x trainer needs NO extra Python deps here — it shells out to a
+# local Isaac-GR00T clone with its own uv env (Python 3.10 + CUDA).
+# Set up with scripts/setup-gr00t.sh and point GR00T_REPO_DIR at it.
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
@@ -54,3 +57,6 @@ include = ["worker.py", "stats_worker.py", "callbacks.py", "storage.py", "config
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
