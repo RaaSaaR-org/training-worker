@@ -78,19 +78,25 @@ All config via env vars or a `.env` file — see `.env.example`.
 | `RUSTFS_ENDPOINT` | `http://localhost:9000` | Pi's RustFS URL when running on Mac |
 | `TRAINING_DEVICE` | `cpu` | `mps` on Mac, `cuda` on Linux GPU |
 | `TRAINER_STUB` | `false` | Set `true` during Phase 1a validation |
-| `GR00T_REPO_DIR` | — | Path to a local Isaac-GR00T clone (GR00T jobs only) |
+| `WORKER_KINDS` | `supervised,reward_model,annotate` | Job kinds this worker claims (sent to `/workers/claim`) |
+| `GR00T_BACKEND` | `isaac` | `lerobot` = native in-process GR00T N1.7 trainer (no v3→v2 conversion) |
+| `GR00T_REPO_DIR` | — | Path to a local Isaac-GR00T clone (isaac backend only) |
 | `GR00T_PYTHON` | — | Optional interpreter with `gr00t` installed (containers) |
 | `GR00T_CONVERTER_PYTHON` | — | Optional interpreter for the LeRobot v3→v2 converter |
+| `LEROBOT_ANNOTATE_BIN` | auto | Override path to the `lerobot-annotate` CLI (annotate jobs) |
 
 ## Trainer dispatch
 
-The worker picks a trainer **per job** from the job's `baseModel`:
+The worker picks a runner **per job** — first by the job's `kind`, then by `baseModel`:
 
-| baseModel | Trainer | Device |
-|---|---|---|
-| contains `gr00t` | `Gr00tTrainer` — GR00T N1.x via Isaac-GR00T subprocess | CUDA only |
-| anything else | `SmolVLALoraTrainer` — in-process HF + PEFT | MPS / CUDA / CPU |
-| (`TRAINER_STUB=true`) | `StubTrainer` — fakes the loop | any |
+| kind / baseModel | Runner | Device | Extras |
+|---|---|---|---|
+| kind `reward_model` | `RewardModelRunner` — Robometer/TOPReward progress curves | CUDA (MPS works) | `.[rewards]` |
+| kind `annotate` | `AnnotateRunner` — `lerobot-annotate` VLM subtasks + VQA | CUDA | `.[annotate]` |
+| contains `gr00t` | `Gr00tTrainer` — GR00T N1.x via Isaac-GR00T subprocess | CUDA only | — (own uv env) |
+| contains `gr00t` + `GR00T_BACKEND=lerobot` | `Gr00tLerobotTrainer` — native in-process, LeRobot v3 direct | CUDA | `.[groot]` |
+| anything else | `SmolVLALoraTrainer` — in-process HF + PEFT | MPS / CUDA / CPU | `.[real-trainer]` |
+| (`TRAINER_STUB=true`) | `StubTrainer` — fakes the loop | any | — |
 
 ## Phase 1b — Real SmolVLA LoRA trainer
 
@@ -101,12 +107,8 @@ To run actual fine-tuning (not the stub), you need the full ML stack **and** LeR
 cd training-worker
 source .venv/bin/activate
 
-# Install the ML dependencies listed in pyproject.toml
-uv pip install -e .
-
-# LeRobot isn't on PyPI — install from source
-git clone https://github.com/huggingface/lerobot /tmp/lerobot
-uv pip install -e "/tmp/lerobot[smolvla]"
+# Install the ML dependencies incl. LeRobot (on PyPI since v0.6.0)
+uv pip install -e ".[real-trainer]"
 
 # Switch off stub mode
 export TRAINER_STUB=false

@@ -1,4 +1,4 @@
-"""Trainer dispatch — the worker must pick the trainer per job's base model."""
+"""Trainer dispatch — the worker picks the runner per job kind + base model."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def make_config(stub: bool = False) -> Config:
     )
 
 
-def make_job(base_model: str) -> ClaimedJob:
+def make_job(base_model: str, kind: str = "supervised") -> ClaimedJob:
     return ClaimedJob(
         id="job-1",
         dataset_id="ds-1",
@@ -40,6 +40,7 @@ def make_job(base_model: str) -> ClaimedJob:
         fine_tune_method="finetune",
         hyperparameters={},
         status="running",
+        kind=kind,
     )
 
 
@@ -62,3 +63,56 @@ def test_smolvla_base_model_gets_smolvla_trainer():
 
     trainer = _pick_trainer(make_config(), make_job("smolvla"))
     assert isinstance(trainer, SmolVLALoraTrainer)
+
+
+# ------------------------------------------------------------- job kinds (179)
+def test_reward_model_kind_gets_reward_runner():
+    from eval.reward_model import RewardModelRunner
+
+    trainer = _pick_trainer(make_config(), make_job("robometer", kind="reward_model"))
+    assert isinstance(trainer, RewardModelRunner)
+
+
+def test_annotate_kind_gets_annotate_runner():
+    from eval.annotate import AnnotateRunner
+
+    trainer = _pick_trainer(make_config(), make_job("lerobot-annotate", kind="annotate"))
+    assert isinstance(trainer, AnnotateRunner)
+
+
+def test_stub_mode_wins_over_job_kind():
+    trainer = _pick_trainer(make_config(stub=True), make_job("robometer", kind="reward_model"))
+    assert isinstance(trainer, StubTrainer)
+
+
+def test_unknown_kind_raises_instead_of_supervised_fallthrough():
+    """A sim_rl (or future) kind must fail the job, not train SmolVLA on it."""
+    with pytest.raises(RuntimeError, match="Unsupported job kind 'sim_rl'"):
+        _pick_trainer(make_config(), make_job("smolvla", kind="sim_rl"))
+
+
+# ---------------------------------------------------------- GR00T backend (179)
+def test_gr00t_backend_lerobot_gets_native_trainer(monkeypatch):
+    from trainers.gr00t_lerobot import Gr00tLerobotTrainer
+
+    monkeypatch.setenv("GR00T_BACKEND", "lerobot")
+    trainer = _pick_trainer(make_config(), make_job("groot_n1_7"))
+    assert isinstance(trainer, Gr00tLerobotTrainer)
+
+
+def test_gr00t_backend_isaac_explicit_keeps_subprocess_trainer(monkeypatch):
+    monkeypatch.setenv("GR00T_BACKEND", "isaac")
+    trainer = _pick_trainer(make_config(), make_job("gr00t-n1.7"))
+    assert isinstance(trainer, Gr00tTrainer)
+
+
+def test_gr00t_backend_default_is_isaac(monkeypatch):
+    monkeypatch.delenv("GR00T_BACKEND", raising=False)
+    trainer = _pick_trainer(make_config(), make_job("groot_n1_7"))
+    assert isinstance(trainer, Gr00tTrainer)
+
+
+def test_gr00t_backend_unknown_raises(monkeypatch):
+    monkeypatch.setenv("GR00T_BACKEND", "bogus")
+    with pytest.raises(RuntimeError, match="GR00T_BACKEND"):
+        _pick_trainer(make_config(), make_job("gr00t-n1.7"))

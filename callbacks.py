@@ -33,6 +33,8 @@ class ClaimedJob:
     fine_tune_method: str
     hyperparameters: dict[str, Any]
     status: str
+    # Job kind (TASK-179): "supervised" (default) | "reward_model" | "annotate" | ...
+    kind: str = "supervised"
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -50,6 +52,7 @@ class ClaimedJob:
             fine_tune_method=job.get("fineTuneMethod", "lora"),
             hyperparameters=job.get("hyperparameters", {}) or {},
             status=job.get("status", "running"),
+            kind=job.get("kind") or "supervised",
             raw=job,
         )
 
@@ -62,11 +65,13 @@ class ServerClient:
         base_url: str,
         worker_id: str,
         device: str = "cpu",
+        kinds: list[str] | None = None,
         timeout_sec: float = 15.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.worker_id = worker_id
         self.device = device
+        self.kinds = list(kinds) if kinds else []
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout_sec)
 
     # ------------------------------------------------------------------ claim
@@ -74,12 +79,14 @@ class ServerClient:
         """POST /api/training/workers/claim — returns a job or None (204).
 
         Sends `device` alongside `workerId` so the server can register
-        idle workers in its in-memory registry (TASK-145).
+        idle workers in its in-memory registry (TASK-145), and `kinds`
+        (from WORKER_KINDS) so it only hands out job kinds this worker
+        can run (TASK-179).
         """
-        resp = self._post(
-            "/api/training/workers/claim",
-            {"workerId": self.worker_id, "device": self.device},
-        )
+        body: dict[str, Any] = {"workerId": self.worker_id, "device": self.device}
+        if self.kinds:
+            body["kinds"] = self.kinds
+        resp = self._post("/api/training/workers/claim", body)
         if resp.status_code == 204:
             return None
         resp.raise_for_status()

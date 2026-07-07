@@ -76,8 +76,9 @@ def resolve_base_model(base_model: str) -> str:
     """Map server-side model aliases to HuggingFace ids.
 
     Anything containing a "/" is passed through untouched. Bare aliases
-    (gr00t, gr00t-n1.7, GR00T_N1_7, …) resolve to the N1.7 base; "n1.5"
-    aliases resolve to the older N1.5 base.
+    (gr00t, gr00t-n1.7, GR00T_N1_7, groot_n1_7, …) resolve to the N1.7
+    base; "n1.5" aliases resolve to the older N1.5 base. Shared by both
+    GR00T backends (Isaac subprocess + native lerobot, TASK-179).
     """
     name = (base_model or "").strip()
     if "/" in name:
