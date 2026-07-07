@@ -27,12 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Real SmolVLA LoRA trainer (Phase 1b). Requires LeRobot which is not
-# on PyPI — install separately from a git clone:
-#   git clone https://github.com/huggingface/lerobot /tmp/lerobot
-#   uv pip install -e /tmp/lerobot
+# Real SmolVLA LoRA trainer (Phase 1b). LeRobot is on PyPI since v0.6.0;
+# the base package is lightweight — policy/dataset deps live behind extras.
 real-trainer = [
-    # lerobot is installed from source (see README)
+    "lerobot[smolvla,dataset]>=0.6.0",
 ]
 # GR00T N1.x trainer needs NO extra Python deps here — it shells out to a
 # local Isaac-GR00T clone with its own uv env (Python 3.10 + CUDA).

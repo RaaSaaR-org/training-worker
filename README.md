@@ -101,12 +101,8 @@ To run actual fine-tuning (not the stub), you need the full ML stack **and** LeR
 cd training-worker
 source .venv/bin/activate
 
-# Install the ML dependencies listed in pyproject.toml
-uv pip install -e .
-
-# LeRobot isn't on PyPI — install from source
-git clone https://github.com/huggingface/lerobot /tmp/lerobot
-uv pip install -e "/tmp/lerobot[smolvla]"
+# Install the ML dependencies incl. LeRobot (on PyPI since v0.6.0)
+uv pip install -e ".[real-trainer]"
 
 # Switch off stub mode
 export TRAINER_STUB=false
