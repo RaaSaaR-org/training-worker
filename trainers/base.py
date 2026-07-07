@@ -56,6 +56,26 @@ class CancelledError(Exception):
 ProgressCallback = Callable[[ProgressEvent], bool]
 
 
+def make_dataloader_kwargs(device: str, hyperparameters: dict[str, Any]) -> dict[str, Any]:
+    """Shared torch DataLoader worker/pinning kwargs (TASK-179 §9).
+
+    On CUDA, parallel decode + pinned memory speeds up multi-camera video
+    datasets considerably: `dataloader_num_workers` hyperparameter (default
+    4) with persistent workers and prefetching.
+
+    On MPS/CPU this stays at num_workers=0 — multi-worker loading sometimes
+    deadlocks on Apple Silicon and Raspberry Pi.
+    """
+    if device == "cuda":
+        num_workers = int(hyperparameters.get("dataloader_num_workers", 4))
+        kwargs: dict[str, Any] = {"num_workers": num_workers, "pin_memory": True}
+        if num_workers > 0:
+            kwargs["persistent_workers"] = True
+            kwargs["prefetch_factor"] = 2
+        return kwargs
+    return {"num_workers": 0, "pin_memory": False}
+
+
 class BaseTrainer(ABC):
     """All trainers implement this interface."""
 

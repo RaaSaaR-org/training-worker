@@ -27,6 +27,7 @@ from .base import (
     ProgressEvent,
     TrainerContext,
     TrainerResult,
+    make_dataloader_kwargs,
 )
 
 log = logging.getLogger(__name__)
@@ -109,12 +110,13 @@ class SmolVLALoraTrainer(BaseTrainer):
             empty_cameras,
         )
 
+        # MPS/Pi safety: multi-worker sometimes deadlocks — non-CUDA stays at
+        # num_workers=0. CUDA gets parallel decode + pinned memory (TASK-179).
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=0,  # MPS/Pi safety: multi-worker sometimes deadlocks
-            pin_memory=(ctx.device == "cuda"),
+            **make_dataloader_kwargs(ctx.device, hp),
         )
         steps_per_epoch = len(loader)
         total_steps = epochs * steps_per_epoch

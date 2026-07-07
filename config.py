@@ -5,8 +5,14 @@ from __future__ import annotations
 import os
 import socket
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _parse_kinds(raw: str) -> list[str]:
+    """Parse WORKER_KINDS ('a,b,c') into a clean list, keeping order."""
+    kinds = [k.strip() for k in raw.split(",")]
+    return [k for k in kinds if k]
 
 
 def _load_env_file(path: Path) -> None:
@@ -58,6 +64,13 @@ class Config:
     stub_mode: bool  # Phase 1a: fake trainer
     heartbeat_interval_sec: float
 
+    # Job kinds this worker claims (sent in the /claim body, TASK-179).
+    # Comma-separated env WORKER_KINDS; default covers supervised training
+    # plus the reward-model and annotation runners.
+    worker_kinds: list[str] = field(
+        default_factory=lambda: ["supervised", "reward_model", "annotate"]
+    )
+
     @classmethod
     def from_env(cls) -> "Config":
         # Load .env file from worker dir if present
@@ -78,6 +91,9 @@ class Config:
             checkpoint_interval_steps=int(os.environ.get("CHECKPOINT_INTERVAL_STEPS", "100")),
             stub_mode=os.environ.get("TRAINER_STUB", "false").lower() in ("1", "true", "yes"),
             heartbeat_interval_sec=float(os.environ.get("HEARTBEAT_INTERVAL_SEC", "30")),
+            worker_kinds=_parse_kinds(
+                os.environ.get("WORKER_KINDS", "supervised,reward_model,annotate")
+            ),
         )
 
     def summary(self) -> str:

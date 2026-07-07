@@ -1,8 +1,12 @@
 """NeoDEM training worker — poll server, claim jobs, run trainers, post callbacks.
 
-Trainers are picked per job from the job's base model:
-  - smolvla* → SmolVLA + PEFT LoRA (in-process, MPS/CUDA)
-  - gr00t*   → GR00T N1.x via Isaac-GR00T subprocess (CUDA only)
+Runners are picked per job — first by the job's `kind`, then (for
+supervised jobs) by its base model:
+  - kind=reward_model → RewardModelRunner (Robometer/TOPReward episode scoring)
+  - kind=annotate     → AnnotateRunner (lerobot-annotate VLM subtasks/VQA)
+  - smolvla*          → SmolVLA + PEFT LoRA (in-process, MPS/CUDA)
+  - gr00t*/groot*     → GR00T N1.x — Isaac-GR00T subprocess (default) or the
+                        native LeRobot trainer when GR00T_BACKEND=lerobot
   - TRAINER_STUB=true forces the stub trainer for all jobs.
 
 Run:
@@ -13,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import tempfile
 import threading
@@ -76,7 +81,7 @@ class HeartbeatThread(threading.Thread):
 
 # ------------------------------------------------------------------ trainer pick
 def _pick_trainer(cfg: Config, job: ClaimedJob) -> BaseTrainer:
-    """Select the trainer for one job based on its base model.
+    """Select the runner for one job — by job kind, then base model.
 
     Imports are lazy so stub mode doesn't require torch/transformers, and
     a missing ML stack only fails the affected job — not the worker.
@@ -85,8 +90,33 @@ def _pick_trainer(cfg: Config, job: ClaimedJob) -> BaseTrainer:
         log.info("Using StubTrainer (TRAINER_STUB=true)")
         return StubTrainer()
 
+    kind = (job.kind or "supervised").lower()
+    if kind == "reward_model":
+        from eval.reward_model import RewardModelRunner
+
+        log.info("Using RewardModelRunner for job kind %r", job.kind)
+        return RewardModelRunner()
+    if kind == "annotate":
+        from eval.annotate import AnnotateRunner
+
+        log.info("Using AnnotateRunner for job kind %r", job.kind)
+        return AnnotateRunner()
+
     base = (job.base_model or "").lower()
     if "gr00t" in base or "groot" in base:
+        backend = os.environ.get("GR00T_BACKEND", "isaac").strip().lower() or "isaac"
+        if backend == "lerobot":
+            from trainers.gr00t_lerobot import Gr00tLerobotTrainer
+
+            log.info(
+                "Using Gr00tLerobotTrainer for base model %r (GR00T_BACKEND=lerobot)",
+                job.base_model,
+            )
+            return Gr00tLerobotTrainer()
+        if backend != "isaac":
+            raise RuntimeError(
+                f"Unknown GR00T_BACKEND={backend!r} — expected 'isaac' or 'lerobot'"
+            )
         from trainers.gr00t_n1 import Gr00tTrainer
 
         log.info("Using Gr00tTrainer for base model %r", job.base_model)
@@ -106,8 +136,9 @@ def _pick_trainer(cfg: Config, job: ClaimedJob) -> BaseTrainer:
 # -------------------------------------------------------------- single job run
 def _run_one_job(cfg: Config, server: ServerClient, job: ClaimedJob) -> None:
     log.info(
-        "▶ Running job %s — dataset=%s base=%s method=%s",
+        "▶ Running job %s — kind=%s dataset=%s base=%s method=%s",
         job.id,
+        job.kind,
         job.dataset_id,
         job.base_model,
         job.fine_tune_method,
@@ -241,7 +272,9 @@ def main() -> None:
     cfg = Config.from_env()
     log.info("NeoDEM training worker starting — %s", cfg.summary())
 
-    server = ServerClient(cfg.server_url, cfg.worker_id, device=cfg.device)
+    server = ServerClient(
+        cfg.server_url, cfg.worker_id, device=cfg.device, kinds=cfg.worker_kinds
+    )
 
     idle_prints = 0
     try:
