@@ -85,6 +85,12 @@ def test_stub_mode_wins_over_job_kind():
     assert isinstance(trainer, StubTrainer)
 
 
+def test_unknown_kind_raises_instead_of_supervised_fallthrough():
+    """A sim_rl (or future) kind must fail the job, not train SmolVLA on it."""
+    with pytest.raises(RuntimeError, match="Unsupported job kind 'sim_rl'"):
+        _pick_trainer(make_config(), make_job("smolvla", kind="sim_rl"))
+
+
 # ---------------------------------------------------------- GR00T backend (179)
 def test_gr00t_backend_lerobot_gets_native_trainer(monkeypatch):
     from trainers.gr00t_lerobot import Gr00tLerobotTrainer

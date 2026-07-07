@@ -101,6 +101,14 @@ def _pick_trainer(cfg: Config, job: ClaimedJob) -> BaseTrainer:
 
         log.info("Using AnnotateRunner for job kind %r", job.kind)
         return AnnotateRunner()
+    if kind != "supervised":
+        # Never fall through to a supervised trainer for a job kind this
+        # worker doesn't implement (e.g. sim_rl claimed via a misconfigured
+        # WORKER_KINDS) — fail the job cleanly instead.
+        raise RuntimeError(
+            f"Unsupported job kind {job.kind!r} — this worker handles "
+            "supervised, reward_model and annotate (check WORKER_KINDS)"
+        )
 
     base = (job.base_model or "").lower()
     if "gr00t" in base or "groot" in base:

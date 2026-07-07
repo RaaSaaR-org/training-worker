@@ -204,10 +204,17 @@ class RewardModelRunner(BaseTrainer):
 
     def _resolve_episodes(self, hp: dict[str, Any], dataset: Any) -> list[int]:
         """hyperparameters.episodes, or all episodes when absent/empty."""
-        episodes = hp.get("episodes") or []
-        if episodes:
-            return [int(e) for e in episodes]
-        return list(range(int(dataset.meta.total_episodes)))
+        total = int(dataset.meta.total_episodes)
+        episodes = [int(e) for e in (hp.get("episodes") or [])]
+        if not episodes:
+            return list(range(total))
+        bad = [e for e in episodes if e < 0 or e >= total]
+        if bad:
+            raise RuntimeError(
+                f"episodes {bad} out of range — dataset has {total} episode(s) "
+                f"(valid indices 0..{total - 1})"
+            )
+        return episodes
 
     def _resolve_image_key(self, hp: dict[str, Any], dataset: Any) -> str:
         """hyperparameters.imageKey, or the dataset's first camera key."""
@@ -318,7 +325,12 @@ class RewardModelRunner(BaseTrainer):
         with torch.no_grad():
             for endpoint in endpoints:
                 window = self._sample_window(start, endpoint, max_frames)
-                frames = torch.stack([frame(fid) for fid in window])  # (T, C, H, W)
+                # (1, T, C, H, W): ONE trajectory of T frames. The lerobot
+                # reward encoders treat 4-D input as (B, C, H, W) — a batch
+                # of single-frame trajectories — so the batch dim must be
+                # explicit here (AddBatchDimensionProcessorStep only
+                # unsqueezes 3-D image tensors).
+                frames = torch.stack([frame(fid) for fid in window]).unsqueeze(0)
                 batch = {image_key: frames, "task": task}
                 scores = model.compute_reward(preprocess(batch))
                 curve.append(float(scores.reshape(-1)[-1].item()))

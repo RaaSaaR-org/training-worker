@@ -102,8 +102,16 @@ def fake_reward_factory(monkeypatch) -> dict[str, Any]:
         def compute_reward(self, batch):
             import torch
 
-            # Progress = mean pixel value of the window's last frame.
-            return torch.tensor([float(batch["frames"][-1].mean())])
+            # Mirrors the real robometer/topreward contract: frames arrive
+            # as (B, T, C, H, W) — ONE trajectory of T frames per batch item
+            # (a 4-D tensor would be misread as B single-frame trajectories)
+            # — and one reward per batch item comes back. Progress = mean
+            # pixel value of the trajectory's last frame.
+            frames = batch["frames"]
+            assert frames.dim() == 5, (
+                f"expected (B, T, C, H, W) trajectory frames, got {tuple(frames.shape)}"
+            )
+            return torch.tensor([float(traj[-1].mean()) for traj in frames])
 
     def fake_make_config(reward_type: str, **kwargs):
         calls["configs"].append((reward_type, kwargs))
@@ -210,6 +218,12 @@ def test_cancellation_between_episodes(tmp_path, fake_dataset, fake_reward_facto
 def test_unsupported_reward_type_raises(tmp_path):
     ctx = make_ctx(tmp_path, base_model="", hyperparameters={"rewardType": "bogus"})
     with pytest.raises(RuntimeError, match="rewardType"):
+        RewardModelRunner().train(ctx, lambda ev: True)
+
+
+def test_episode_index_out_of_range_raises(tmp_path, fake_dataset, fake_reward_factory):
+    ctx = make_ctx(tmp_path, hyperparameters={"rewardType": "robometer", "episodes": [0, 7]})
+    with pytest.raises(RuntimeError, match=r"episodes \[7\] out of range"):
         RewardModelRunner().train(ctx, lambda ev: True)
 
 
