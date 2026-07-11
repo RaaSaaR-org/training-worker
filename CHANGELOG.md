@@ -3,6 +3,17 @@
 All notable changes to the NeoDEM training worker are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versioning uses [CalVer](https://calver.org/) (`YYYY.MM.DD`) for daily releases.
 
+## [v2026.07.11] - 2026-07-11
+
+### Added
+
+- LeRobot 0.6.0 — reward-model/annotate job kinds, native GR00T N1.7 trainer, GPU setup (#5)
+
+### Fixed
+
+- GR00T live loss telemetry, parallel S3 I/O, slim artifacts, Windows-safe cancel (#7)
+
+
 ## [v2026.07.04] - 2026-07-04
 
 ### Added
