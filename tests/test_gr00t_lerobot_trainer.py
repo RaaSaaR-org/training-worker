@@ -66,11 +66,13 @@ def fake_groot_modules(monkeypatch) -> dict[str, Any]:
             revision: str,
             download_videos: bool = True,
             delta_timestamps: dict | None = None,
+            video_backend: str | None = None,
         ) -> None:
             self.repo_id = repo_id
             self.root = root
             self.revision = revision
             self.delta_timestamps = delta_timestamps
+            self.video_backend = video_backend
             self.fps = 10
             self.meta = FakeMeta()
             seen["datasets"].append(self)

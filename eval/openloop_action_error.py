@@ -38,6 +38,8 @@ try:
 except ImportError:  # pragma: no cover
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
+from trainers.base import default_video_backend
+
 
 def _to_uint8_hwc(img) -> np.ndarray:
     """Normalize a LeRobot image item to an (H, W, 3) uint8 array.
@@ -82,7 +84,12 @@ def main() -> int:
     headers = {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else {}
 
     # --- Load the dataset (from a local copy of the RustFS-hosted dataset) -----
-    ds = LeRobotDataset("local/dex3-eval", root=args.dataset_root, revision=args.dataset_revision)
+    ds = LeRobotDataset(
+        "local/dex3-eval",
+        root=args.dataset_root,
+        revision=args.dataset_revision,
+        video_backend=default_video_backend(),
+    )
     feats = ds.meta.features
     image_keys = [k for k, v in feats.items() if v.get("dtype") == "video" or v.get("dtype") == "image"]
     if not image_keys:

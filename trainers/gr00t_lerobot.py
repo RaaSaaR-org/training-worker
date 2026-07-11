@@ -34,6 +34,7 @@ from .base import (
     ProgressEvent,
     TrainerContext,
     TrainerResult,
+    default_video_backend,
     make_dataloader_kwargs,
 )
 from .gr00t_n1 import resolve_base_model
@@ -167,12 +168,18 @@ class Gr00tLerobotTrainer(BaseTrainer):
             if max_steps > 0 and step_idx >= max_steps:
                 break
 
-        # 5) Save checkpoint + pack into a tarball
+        # 5) Save checkpoint + pack into a tarball. Save in bf16: the N1.7
+        # recipe trains and serves in bf16 (see _amp_context), and an fp32
+        # dump doubles the artifact to ~12 GB for no fidelity the policy
+        # ever uses.
         checkpoint_dir = ctx.work_dir / "gr00t_checkpoint"
-        policy.save_pretrained(str(checkpoint_dir))
+        policy.to(torch.bfloat16).save_pretrained(str(checkpoint_dir))
 
         artifact_path = ctx.work_dir / "gr00t_lerobot.tar.gz"
-        with tarfile.open(artifact_path, "w:gz") as tf:
+        # compresslevel=1: the tar is dominated by safetensors, which are
+        # incompressible — level 9 burns tens of minutes on a 3B model for
+        # no size gain (same lesson as the Isaac-GR00T servable tar).
+        with tarfile.open(artifact_path, "w:gz", compresslevel=1) as tf:
             tf.add(checkpoint_dir, arcname="gr00t_checkpoint")
         log.info("[GR00T-lerobot] wrote artifact %s", artifact_path)
 
@@ -226,6 +233,7 @@ class Gr00tLerobotTrainer(BaseTrainer):
             root=str(root),
             revision=revision,
             download_videos=True,
+            video_backend=default_video_backend(),
         )
 
     def _reload_with_deltas(
@@ -253,6 +261,7 @@ class Gr00tLerobotTrainer(BaseTrainer):
             revision=revision,
             download_videos=True,
             delta_timestamps=delta_timestamps,
+            video_backend=default_video_backend(),
         )
 
     def _make_groot_config(self, ctx: TrainerContext, hp: dict[str, Any]) -> Any:
