@@ -73,19 +73,30 @@ _DEFAULT_BASE_MODEL = "nvidia/GR00T-N1.7-3B"
 
 
 def resolve_base_model(base_model: str) -> str:
-    """Map server-side model aliases to HuggingFace ids.
+    """Map server-side model aliases to HuggingFace ids (or a local dir).
 
-    Anything containing a "/" is passed through untouched. Bare aliases
-    (gr00t, gr00t-n1.7, GR00T_N1_7, groot_n1_7, …) resolve to the N1.7
-    base; "n1.5" aliases resolve to the older N1.5 base. Shared by both
-    GR00T backends (Isaac subprocess + native lerobot, TASK-179).
+    Anything containing a "/" or "\\" is treated as an explicit path/id and
+    passed through untouched. Bare aliases (gr00t, gr00t-n1.7, GR00T_N1_7,
+    groot_n1_7, …) resolve to the N1.7 base; "n1.5" aliases resolve to the
+    older N1.5 base. Shared by both GR00T backends (Isaac subprocess +
+    native lerobot, TASK-179).
+
+    The NVIDIA GR00T weights on the Hub are license-gated, so the plain
+    aliases fail on machines without an accepted-license HF token. When
+    ``GR00T_LOCAL_BASE_MODEL`` points at a local checkpoint dir, an N1.7
+    alias resolves to it instead — the wizard's "GR00T N1.7" button then
+    trains against the local weights with no Hub download or gate.
     """
     name = (base_model or "").strip()
-    if "/" in name:
+    if "/" in name or "\\" in name:
         return name
     normalized = name.lower().replace("_", ".").replace("-", ".")
     if "n1.5" in normalized:
         return "nvidia/GR00T-N1.5-3B"
+    local = os.environ.get("GR00T_LOCAL_BASE_MODEL", "").strip()
+    if local and Path(local).expanduser().exists():
+        log.info("[GR00T] resolving alias %r to local base model %s", name, local)
+        return local
     return _DEFAULT_BASE_MODEL
 
 
@@ -123,7 +134,7 @@ class Gr00tTrainer(BaseTrainer):
         output_dir.mkdir(parents=True, exist_ok=True)
         cmd = self._build_command(repo_dir, ctx, dataset_dir, modality_config, output_dir, hp)
         log.info("[GR00T] launching: %s", " ".join(cmd))
-        final_state = self._run_and_stream(cmd, repo_dir, ctx, on_progress, hp)
+        final_state = self._run_and_stream(cmd, repo_dir, ctx, on_progress, hp, output_dir)
 
         # 4) Package the newest checkpoint as the artifact.
         artifact_path = self._package_artifact(ctx, output_dir)
@@ -432,7 +443,10 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         max_steps = int(hp.get("max_steps", 0) or 2000)
         batch_size = int(hp.get("global_batch_size", hp.get("batch_size", 32)))
         embodiment_tag = str(hp.get("embodiment_tag", "NEW_EMBODIMENT"))
-        num_workers = int(hp.get("dataloader_num_workers", 4))
+        # Default to 0 dataloader workers: on Windows (spawn start method) the
+        # LeRobot video-decode workers are fragile, and the proven G1-Dex3 run
+        # on this box used 0. Override via hyperparameters.dataloader_num_workers.
+        num_workers = int(hp.get("dataloader_num_workers", 0))
         learning_rate = float(hp.get("learning_rate", 1e-4))
         extra_args = [str(a) for a in hp.get("extra_args", [])]
 
@@ -469,6 +483,7 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         ctx: TrainerContext,
         on_progress: ProgressCallback,
         hp: dict[str, Any],
+        output_dir: Path | None = None,
     ) -> dict[str, Any]:
         """Run the fine-tune subprocess, parse progress, honour cancellation.
 
@@ -481,6 +496,25 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         env = dict(os.environ)
         env.setdefault("HF_HOME", str(ctx.hf_cache_dir))
         env.setdefault("TOKENIZERS_PARALLELISM", "false")
+        # The child's stdout is a pipe, so CPython block-buffers it: HF Trainer's
+        # {'loss': ...} log dicts sit in the buffer until exit while tqdm (stderr)
+        # streams live — the UI then shows real steps but a flat 0.0 loss for the
+        # whole run. Unbuffered stdout makes the loss lines stream as they happen.
+        env["PYTHONUNBUFFERED"] = "1"
+
+        # GR00T-N1.7 rebuilds its Qwen3 / nvidia-Cosmos-Reason2-2B vision-language
+        # backbone from the Hub during model init — even when --base-model-path is
+        # a local checkpoint. That repo is license-gated, so a fresh/empty HF cache
+        # 401s and the fine-tune dies before step 1. Point HF at a cache that
+        # already holds the backbone AND the operator's own HF token (i.e. the
+        # machine's default HF cache, populated when they first set GR00T up and
+        # accepted the license). GR00T does an explicit HfApi model_info() call
+        # that offline mode hard-fails, so we stay online: the request authenticates
+        # with the operator's existing token and the weights resolve from cache — no
+        # re-download, no new credential, no license accepted on their behalf.
+        gr00t_hf_home = os.environ.get("GR00T_HF_HOME", "").strip()
+        if gr00t_hf_home:
+            env["HF_HOME"] = gr00t_hf_home
 
         state = {"step": 0, "total": max_steps, "loss": 0.0, "lr": lr}
         state_lock = threading.Lock()
@@ -516,9 +550,48 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
         reader = threading.Thread(target=_reader, daemon=True, name="gr00t-log-reader")
         reader.start()
 
+        # Backfill telemetry from the newest checkpoint's trainer_state.json.
+        # HF Trainer appends every logged {loss, learning_rate, step} entry to
+        # log_history there, so it stays the ground truth even if a trainer
+        # variant writes nothing parseable to stdout.
+        ts_mtime = 0.0
+
+        def _merge_trainer_state() -> None:
+            nonlocal ts_mtime
+            if output_dir is None:
+                return
+            try:
+                candidates = sorted(
+                    output_dir.glob("checkpoint-*/trainer_state.json"),
+                    key=lambda p: int(p.parent.name.rsplit("-", 1)[-1])
+                    if p.parent.name.rsplit("-", 1)[-1].isdigit()
+                    else -1,
+                )
+                if not candidates:
+                    return
+                ts_file = candidates[-1]
+                mtime = ts_file.stat().st_mtime
+                if mtime <= ts_mtime:
+                    return
+                history = json.loads(ts_file.read_text()).get("log_history", [])
+                entries = [e for e in history if "loss" in e and "step" in e]
+                if not entries:
+                    return
+                last = entries[-1]
+                ts_mtime = mtime
+                with state_lock:
+                    if int(last["step"]) >= state["step"] or not state["loss"]:
+                        state["loss"] = float(last["loss"])
+                        state["lr"] = float(last.get("learning_rate", state["lr"]))
+                        state["step"] = max(state["step"], int(last["step"]))
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                # checkpoint mid-write or malformed — next poll retries
+                pass
+
         cancelled = False
         while True:
             ret = proc.poll()
+            _merge_trainer_state()
             with state_lock:
                 event = ProgressEvent(
                     step=state["step"],
@@ -552,17 +625,90 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
             raise RuntimeError(
                 f"GR00T fine-tuning exited with code {proc.returncode}. Log tail:\n{log_tail}"
             )
+        self._replay_log_history(output_dir, state, on_progress)
         log.info("[GR00T] fine-tuning finished — final step %d loss %.4f",
                  state["step"], state["loss"])
         return state
 
     @staticmethod
+    def _replay_log_history(
+        output_dir: Path | None,
+        state: dict[str, Any],
+        on_progress: ProgressCallback,
+    ) -> None:
+        """Stream the final checkpoint's full loss curve to the server.
+
+        Live stdout/checkpoint parsing is best-effort — if any stretch of the
+        run was missed, the persisted metrics would show gaps or a flat 0.
+        log_history in the final trainer_state.json is the complete, exact
+        curve, so replay it (sampled to <=300 points) right before /complete;
+        the server upserts metrics by step, leaving the UI with the true curve.
+        """
+        if output_dir is None:
+            return
+        try:
+            candidates = sorted(
+                output_dir.glob("checkpoint-*/trainer_state.json"),
+                key=lambda p: int(p.parent.name.rsplit("-", 1)[-1])
+                if p.parent.name.rsplit("-", 1)[-1].isdigit()
+                else -1,
+            )
+            if not candidates:
+                return
+            history = json.loads(candidates[-1].read_text()).get("log_history", [])
+            entries = [e for e in history if "loss" in e and "step" in e]
+            if not entries:
+                return
+            stride = max(1, len(entries) // 300)
+            sampled = entries[::stride]
+            if sampled[-1] is not entries[-1]:
+                sampled.append(entries[-1])
+            log.info("[GR00T] replaying %d/%d loss points from trainer_state.json",
+                     len(sampled), len(entries))
+            for e in sampled:
+                on_progress(
+                    ProgressEvent(
+                        step=int(e["step"]),
+                        total_steps=state["total"],
+                        epoch=1,
+                        total_epochs=1,
+                        loss=round(float(e["loss"]), 6),
+                        learning_rate=float(e.get("learning_rate", state["lr"])),
+                    )
+                )
+            # reader thread has joined by now — safe to write without the lock
+            state["loss"] = float(entries[-1]["loss"])
+            state["step"] = max(state["step"], int(entries[-1]["step"]))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            log.warning("[GR00T] could not replay log_history from trainer_state.json")
+
+    @staticmethod
     def _signal_group(proc: subprocess.Popen, sig: int) -> None:
-        """Signal the subprocess's whole process group, falling back to the
-        direct child if the group is already gone."""
+        """Signal the subprocess's whole process tree, falling back to the
+        direct child if it's already gone.
+
+        Windows has no process groups / os.killpg (calling os.getpgid there
+        raises AttributeError), and a bare terminate() leaves the GPU-heavy
+        finetune child alive — an orphaned run that keeps the whole card
+        pinned. Kill the tree with taskkill /T so a cancelled job actually
+        frees VRAM.
+        """
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=15,
+                )
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return
         try:
             os.killpg(os.getpgid(proc.pid), sig)
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, AttributeError):
             try:
                 proc.send_signal(sig)
             except ProcessLookupError:
@@ -614,6 +760,37 @@ register_modality_config(neodem_config, embodiment_tag=EmbodimentTag.NEW_EMBODIM
 
         artifact_path = ctx.work_dir / "gr00t_finetune.tar.gz"
         log.info("[GR00T] packaging %s → %s", source, artifact_path)
-        with tarfile.open(artifact_path, "w:gz") as tf:
-            tf.add(source, arcname="gr00t_checkpoint")
+
+        # Ship only what's needed to SERVE the policy — the optimizer /
+        # scheduler / RNG state roughly triples the checkpoint (a 3B
+        # full-finetune checkpoint is ~17 GB, of which ~10 GB is optimizer
+        # state) and, at that size, blew up moto's CompleteMultipartUpload.
+        # Dropping the training-only state gives a ~6-7 GB servable tar that
+        # uploads cleanly and is exactly what run_gr00t_server needs.
+        _TRAINING_ONLY = {
+            "optimizer.pt",
+            "optimizer.bin",
+            "scheduler.pt",
+            "rng_state.pth",
+            "trainer_state.json",
+            "training_args.bin",
+        }
+
+        def _servable(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            base = info.name.rsplit("/", 1)[-1]
+            if base in _TRAINING_ONLY or base.startswith("rng_state"):
+                return None
+            # deepspeed shards (global_step*/), if any
+            if "/global_step" in info.name:
+                return None
+            return info
+
+        # compresslevel=1: the payload is safetensors (already-incompressible
+        # tensor data), so gzip's default level 9 burns ~50 min single-threaded
+        # for near-zero size gain. Level 1 packages the same ~7 GB in a couple
+        # of minutes.
+        with tarfile.open(artifact_path, "w:gz", compresslevel=1) as tf:
+            tf.add(source, arcname="gr00t_checkpoint", filter=_servable)
+        log.info("[GR00T] servable artifact %.1f MB",
+                 artifact_path.stat().st_size / 1e6)
         return artifact_path

@@ -40,6 +40,7 @@ from trainers.base import (
     ProgressEvent,
     TrainerContext,
     TrainerResult,
+    default_video_backend,
 )
 
 log = logging.getLogger(__name__)
@@ -200,6 +201,7 @@ class RewardModelRunner(BaseTrainer):
             root=str(root),
             revision=revision,
             download_videos=True,
+            video_backend=default_video_backend(),
         )
 
     def _resolve_episodes(self, hp: dict[str, Any], dataset: Any) -> list[int]:

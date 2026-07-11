@@ -2,10 +2,33 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
+
+
+@lru_cache(maxsize=1)
+def default_video_backend() -> str:
+    """Video decode backend for LeRobotDataset: "torchcodec" or "pyav".
+
+    lerobot 0.6.0 defaults to torchcodec, whose native library needs FFmpeg
+    *shared* DLLs — typically absent on Windows, where the pip install
+    succeeds but the first decode raises "Could not load libtorchcodec".
+    Probe once and fall back to PyAV (self-contained FFmpeg). Override with
+    LEROBOT_VIDEO_BACKEND.
+    """
+    backend = os.environ.get("LEROBOT_VIDEO_BACKEND", "").strip()
+    if backend:
+        return backend
+    try:
+        from torchcodec.decoders import VideoDecoder  # noqa: F401
+
+        return "torchcodec"
+    except Exception:
+        return "pyav"
 
 
 @dataclass

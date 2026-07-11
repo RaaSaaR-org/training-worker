@@ -27,6 +27,7 @@ from .base import (
     ProgressEvent,
     TrainerContext,
     TrainerResult,
+    default_video_backend,
     make_dataloader_kwargs,
 )
 
@@ -285,6 +286,7 @@ class SmolVLALoraTrainer(BaseTrainer):
             root=str(dataset_dir),
             revision=revision,
             download_videos=True,
+            video_backend=default_video_backend(),
         )
 
     def _reload_with_deltas(
@@ -314,6 +316,7 @@ class SmolVLALoraTrainer(BaseTrainer):
             revision=revision,
             download_videos=True,
             delta_timestamps=delta_timestamps,
+            video_backend=default_video_backend(),
         )
 
     def _load_base_policy(
